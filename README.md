@@ -1,5 +1,7 @@
 # LearnIt: A Tool for Machine Learning Beginners
 
+![LearnIt](learnit-ml-pipeline.png)
+
 1. [Introduction](#Introduction)
 2. [Installation](#Installation)
 3. [Quick Tour](#Quick-Tour)
@@ -15,8 +17,6 @@ LearnIt makes the machine learning pipeline easy for you. What you need is just 
 obtain a trained machine learning model with evaluation results. You don't have to manually extract features or 
 select machine learning algorithms or tune hyper-parameters or evaluate trained models. 
 LearnIt takes care of everything from end to end.
-
-![LearnIt](learnit-ml-pipeline.png)
 
 LearnIt is built on top of Pandas and Scikit-learn, popular data science tools, to minimize additional learning cost. You can also register your own feature extraction templates into the library to make LearnIt better. 
 
