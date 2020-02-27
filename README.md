@@ -66,7 +66,7 @@ Please also see a detailed [step-by-step tutorial](docs/step_by_step_tutorial.md
 
 <a name='Contributors'></a><h2> Contributors </h2> 
 
-- Hideki Awashima ([@haisland0909](https://github.com/@haisland0909))
+- Hideki Awashima ([@haisland0909](https://github.com/haisland0909))
 - Kate Pavlovic ([@katepavlovic](https://github.com/katepavlovic))
 - Yoshihiko Suhara ([@suhara](https://github.com/suhara))
 
