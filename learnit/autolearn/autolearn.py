@@ -3,21 +3,17 @@ import os
 import sys
 from time import time
 
-import yaml
-
 import numpy as np
 import pandas as pd
+from progressbar import ProgressBar
+from sklearn.base import clone
 from sklearn.exceptions import NotFittedError
 from tabulate import tabulate
 
 from learnit.autolearn.blueprints import ClassifierCatalog
 from learnit.autolearn.blueprints import MultiClassifierCatalog
 from learnit.autolearn.blueprints import RegressorCatalog
-
-from autosklearn.regression import AutoSklearnRegressor
-from autosklearn.classification import AutoSklearnClassifier
-# TODO(Bublin) Load Metric Function from autosklearn.metrics~
-from autosklearn.metrics import roc_auc, log_loss
+from learnit.autolearn.functions import run_validation
 
 if sys.version_info.major == 3:
     import pickle
@@ -123,9 +119,8 @@ class AutoClassifier(AutoLearnBase):
                  validation_ratio=0.2,
                  pos_label=1,
                  n_jobs=1,
-                 time_left_for_this_task=600,
-                 per_run_time_limit=20,
-                 suppress_warning=True):
+                 verbose=0,
+                 customized_clf_list=None):
         """init function
 
         Args:
@@ -141,9 +136,8 @@ class AutoClassifier(AutoLearnBase):
 
         """
         assert task_type in ['auto', 'binary', 'multi']
-        assert metric in ['auto', 'roc_auc', 'log_loss']
+        assert metric in ['auto', 'roc_auc', 'neg_log_loss']
 
-        self.clf = None
         self.level = level
         self.task_type = task_type
         self.metric = metric
@@ -151,13 +145,11 @@ class AutoClassifier(AutoLearnBase):
         self.validation_ratio = validation_ratio
         self.pos_label = pos_label
         self.n_jobs = n_jobs
+        self.verbose = verbose
+        self.clf_list = customized_clf_list
         self.trained = False
         self.info = None
-        self.time_left_for_this_task = time_left_for_this_task
-        self.per_run_time_limit = per_run_time_limit
-        self.suppress_warning = suppress_warning
 
-    # TODO(Bublin) These Check can be done by auto-sklearn
     def type_task(self, y):
         """Determine prediction task for classification.
 
@@ -204,44 +196,29 @@ class AutoClassifier(AutoLearnBase):
             if self.task_type == 'binary':
                 self.metric = 'roc_auc'
             elif self.task_type == 'multi':
-                self.metric = 'log_loss'
+                self.metric = 'neg_log_loss'
 
         assert self.task_type in ['binary', 'multi']
         # Currently, only support auc_roc for binary, neg_log_loss for multi
         if self.task_type == 'binary':
             assert self.metric in ['roc_auc']
         else:
-            assert self.metric in ['log_loss']
+            assert self.metric in ['neg_log_loss']
 
-        assert self.cv_num >= 1
-        clf_config = {
-            # No Preprocessing
-            "include_preprocessors": ["no_preprocessing"],
-            "n_jobs": self.n_jobs,
-            "time_left_for_this_task": self.time_left_for_this_task,
-            "per_run_time_limit": self.per_run_time_limit
-        }
-        if self.cv_num == 1:
-            clf_config["resampling_strategy"] = "holdout"
-            clf_config["resampling_strategy_arguments"] = {'train_size': 1-self.validation_ratio}
-        else:
-            clf_config["resampling_strategy"] = "cv"
-            clf_config["resampling_strategy_arguments"] = {'folds': self.cv_num}
-        name = "level{}".format(self.level)
-        if self.task_type == "multi":
-            catalog_dict = vars(MultiClassifierCatalog)
-        else:
-            catalog_dict = vars(ClassifierCatalog)
-        if name not in catalog_dict:
-            raise ValueError('level %s not supported' % self.level)
-        clf_config["include_estimators"] = catalog_dict[name]
-        if self.suppress_warning:
-            with open(os.path.join(os.path.dirname(__file__), 'suppress_logging.yaml'),
-                      'r') as fh:
-                logging_config = yaml.safe_load(fh)
-            clf_config["logging_config"] = logging_config
+        # Load classifier blueprints
+        if self.clf_list is None:
+            if self.task_type == 'binary':
+                catalog_dict = vars(ClassifierCatalog)
+            elif self.task_type == 'multi':
+                catalog_dict = vars(MultiClassifierCatalog)
+            else:
+                # TODO(Yoshi): Regression
+                raise AssertionError(
+                    "task_type not supported: {}".format(self.task_type))
 
-        self.clf = AutoSklearnClassifier(**clf_config)
+            name = "level{}".format(self.level)
+            assert name in catalog_dict
+            self.clf_list = catalog_dict[name]
 
     def fit(self, X, y):
         """fit
@@ -265,13 +242,58 @@ class AutoClassifier(AutoLearnBase):
 
         # Pre-training configuration
         self.pre_learn(X, y)
+
         try:
-            metric_module = globals()[self.metric]
-            self.clf.fit(X.copy(), y.copy(), metric=metric_module)
-            self.info["name"] = self.clf.show_models()
-            self.info["clf"] = self.clf
-            if self.cv_num > 1:
-                self.clf.refit(X.copy(), y.copy())
+            print("Learning from data...")
+            sys.stdout.flush()
+            results_dict = {}
+            clf_dict = {}
+            bar = ProgressBar(widget_kwargs=dict(marker=u'█'))
+            for name, clf in bar(self.clf_list):
+                results = run_validation(
+                    X, y, clf,
+                    metric=self.metric,
+                    cv_num=self.cv_num,
+                    validation_ratio=self.validation_ratio,
+                    pos_label=self.pos_label,
+                    n_jobs=self.n_jobs,
+                    verbose=self.verbose
+                )
+                results_dict[name] = results
+                # Note: clf should implement GridSearch so does not have to
+                # conduct parameter search externally.
+                final_clf = clone(clf)
+                final_clf.fit(X, y)
+                assert name not in clf_dict  # Ensure the uniqueness
+                clf_dict[name] = final_clf
+
+            max_name = None
+            max_cv_df = None
+            max_train_eval_df = None
+            max_test_eval_df = None
+            max_value = None
+
+            for name, results in results_dict.items():
+                cv_df = results["cv_df"]
+                train_eval_df = results["train_eval_df"]
+                test_eval_df = results["test_eval_df"]
+
+                # TODO(Yoshi): User can choose evaluation metric for selection
+                cur_value = cv_df['metric_test'].mean()
+                if max_value is None or cur_value > max_value:
+                    max_name = name
+                    max_cv_df = cv_df
+                    max_train_eval_df = train_eval_df
+                    max_test_eval_df = test_eval_df
+                    max_value = cur_value
+
+            assert max_name in clf_dict
+            self.best_clf = clf_dict[max_name]
+            self.info["name"] = max_name
+            self.info["clf"] = self.best_clf
+            self.info["eval_df"] = max_cv_df
+            self.info["train_eval_df"] = max_train_eval_df
+            self.info["test_eval_df"] = max_test_eval_df
 
         except Exception as e:
             # TODO(Yoshi): Handling exception
@@ -297,8 +319,8 @@ class AutoClassifier(AutoLearnBase):
 
         """
         assert self.trained
-        assert hasattr(self.clf, 'predict')
-        return self.clf.predict(X)
+        assert hasattr(self.best_clf, 'predict')
+        return self.best_clf.predict(X)
 
     def predict_proba(self, X):
         """Predict probabilities by self.best_clf
@@ -312,8 +334,8 @@ class AutoClassifier(AutoLearnBase):
 
         """
         assert self.trained
-        assert hasattr(self.clf, 'predict_proba')
-        return self.clf.predict_proba(X)
+        assert hasattr(self.best_clf, 'predict_proba')
+        return self.best_clf.predict_proba(X)
 
     def display(self, tab=True):
 
@@ -334,24 +356,55 @@ class AutoClassifier(AutoLearnBase):
             print('Model is not trained')
             return
 
+        eval_metric = self.info['clf'].scoring
+        clf_name = self.info['clf'].estimator.__class__.__name__
         metric_names = {'Model is trained': self.trained,
-                        'Best classifier': self.clf.show_models(),
-                        'Evaluation metric': self.metric,
+                        'Best classifier': clf_name,
+                        'Evaluation metric': eval_metric,
                         'Dataset size': self.info["dataset_size"],
                         '# of features': self.info["feature_size"],
                         'Classifier set level': self.level,
-                        'Including classifiers': list(map(lambda x: x[1], self.clf.get_models_with_weights())),
-                        'Training time': "{:.2f} sec.".format(self.info["training_time"])}
+                        'Including classifiers': list(map(lambda x: x[0],
+                                                          self.clf_list)),
+                        'Training time': "{:.2f} sec.".format(
+                            self.info["training_time"])}
 
         features_df = pd.DataFrame(list(metric_names.items()),
                                    columns=['metric',
                                             'value']).set_index('metric')
+
+        clf_metrics = ['Accuracy',
+                       'Precision',
+                       'Recall',
+                       eval_metric]
+        metrics_df = pd.DataFrame({'metric': clf_metrics}).set_index('metric')
+
+        eval_test = self.info['eval_df']['metric_test'].mean()
+        eval_train = self.info['eval_df']['metric_train'].mean()
+
+        acc_test = self.info["test_eval_df"]["accuracy"].mean()
+        acc_train = self.info["train_eval_df"]["accuracy"].mean()
+        prec_test = self.info["test_eval_df"]["precision"].mean()
+        prec_train = self.info["train_eval_df"]["precision"].mean()
+        rec_test = self.info["test_eval_df"]["recall"].mean()
+        rec_train = self.info["train_eval_df"]["recall"].mean()
+
+        metrics_df['training set'] = [acc_train,
+                                      prec_train,
+                                      rec_train,
+                                      eval_train]
+        metrics_df['test set'] = [acc_test,
+                                  prec_test,
+                                  rec_test,
+                                  eval_test]
         if tab:
             print(tabulate(features_df, headers='keys', tablefmt='psql'))
+            print(tabulate(metrics_df, headers='keys', tablefmt='psql'))
         else:
             features_df.head()
+            metrics_df.head()
 
-        return features_df
+        return features_df, metrics_df
 
 
 class AutoLearn(object):
@@ -364,22 +417,17 @@ class AutoLearn(object):
                  validation_ratio=0.2,
                  pos_label=1,
                  n_jobs=1,
-                 time_left_for_this_task=600,
-                 per_run_time_limit=20,
-                 suppress_warning=True
-                 ):
+                 verbose=0,
+                 customized_clf_list=None):
         if task == 'regression':
             self.task = 'regression'
             self.learner = AutoRegressor(
                 level=level,
-                metric='mean_absolute_error',
+                metric='neg_mean_absolute_error',
                 cv_num=cv_num,
                 validation_ratio=validation_ratio,
                 n_jobs=n_jobs,
-                time_left_for_this_task=time_left_for_this_task,
-                per_run_time_limit=per_run_time_limit,
-                suppress_warning=suppress_warning
-            )
+                verbose=verbose)
 
         elif task == 'classification':
             self.task = 'classification'
@@ -391,10 +439,8 @@ class AutoLearn(object):
                 validation_ratio=validation_ratio,
                 pos_label=pos_label,
                 n_jobs=n_jobs,
-                time_left_for_this_task=time_left_for_this_task,
-                per_run_time_limit=per_run_time_limit,
-                suppress_warning=suppress_warning
-            )
+                verbose=verbose,
+                customized_clf_list=customized_clf_list)
 
         else:
             raise ValueError('Wrong task_type = %s' % task)
@@ -431,10 +477,8 @@ class AutoLearn(object):
 
 
 class AutoRegressor(AutoLearnBase):
-    def __init__(self, level, metric='mean_absolute_error', cv_num=5,
-                 validation_ratio=0.2, n_jobs=1,
-                 time_left_for_this_task=600,
-                 per_run_time_limit=20, suppress_warning=True):
+    def __init__(self, level, metric='neg_mean_absolute_error', cv_num=5,
+                 verbose=0, validation_ratio=0.2, n_jobs=1):
         """Init
 
         Args:
@@ -446,17 +490,17 @@ class AutoRegressor(AutoLearnBase):
         Returns:
 
         """
-        self.clf = None
         self.level = level
         self.metric = metric
         self.cv_num = cv_num
+        self.verbose = verbose
         self.validation_ratio = validation_ratio
         self.n_jobs = n_jobs
+        # TODO(Kate): decide if we want that and how we match
+        # clf list in classification maybe
+        # self.est_list = customized_reg_list
         self.trained = False
         self.info = None
-        self.time_left_for_this_task = time_left_for_this_task
-        self.per_run_time_limit = per_run_time_limit
-        self.suppress_warning = suppress_warning
 
     def fit(self, X, y):
         """Fitting the regressor
@@ -476,43 +520,57 @@ class AutoRegressor(AutoLearnBase):
         name = "level{}".format(self.level)
         if name not in catalog_dict:
             raise ValueError('level %s not supported' % self.level)
-        clf_config = {
-            # No Preprocessing
-            "include_preprocessors": ["no_preprocessing"],
-            "n_jobs": self.n_jobs,
-            "time_left_for_this_task": self.time_left_for_this_task,
-            "per_run_time_limit": self.per_run_time_limit
-        }
-        if self.cv_num == 1:
-            clf_config["resampling_strategy"] = "holdout"
-            clf_config["resampling_strategy_arguments"] = {
-                'train_size': 1 - self.validation_ratio}
-        else:
-            clf_config["resampling_strategy"] = "cv"
-            clf_config["resampling_strategy_arguments"] = {
-                'folds': self.cv_num}
-        clf_config["include_estimators"] = catalog_dict[name]
-        if self.suppress_warning:
-            with open(os.path.join(os.path.dirname(__file__), 'suppress_logging.yaml'),
-                      'r') as fh:
-                logging_config = yaml.safe_load(fh)
-            clf_config["logging_config"] = logging_config
-        self.clf = AutoSklearnRegressor(**clf_config)
+        self.est_list = catalog_dict[name]
+
+        t1 = time()
         self.info = {}
         self.info["dataset_size"], self.info["feature_size"] = X.shape
-        t1 = time()
-        try:
-            # autosklearn can not use any metrics in Regressor
-            self.clf.fit(X.copy(), y.copy())
-            self.info["name"] = "autosklearn"
-            self.info["clf"] = self.clf
-            if self.cv_num > 1:
-                self.clf.refit(X.copy(), y.copy())
 
-        except Exception as e:
-            # TODO(Yoshi): Handling exception
-            print(e)
-            return None
+        print("Learning from data...")
+        sys.stdout.flush()
+        results_dict = {}
+        est_dict = {}
+        bar = ProgressBar(widget_kwargs=dict(marker=u'█'))
+        for name, est in bar(self.est_list):
+            results = run_validation(
+                X, y, est,
+                metric=self.metric,
+                cv_num=self.cv_num,
+                validation_ratio=self.validation_ratio,
+                verbose=self.verbose)
+            results_dict[name] = results
+            final_est = clone(est)
+            final_est.fit(X, y)
+            assert name not in est_dict  # Ensure the uniqueness
+            est_dict[name] = final_est
+
+        max_name = None
+        max_cv_df = None
+        max_train_eval_df = None
+        max_test_eval_df = None
+        max_value = None
+
+        for name, results in results_dict.items():
+            cv_df = results["cv_df"]
+            train_eval_df = results["train_eval_df"]
+            test_eval_df = results["test_eval_df"]
+
+            # TODO(Yoshi): User can choose evaluation metric for selection
+            cur_value = cv_df['metric_test'].mean()
+            if max_value is None or cur_value > max_value:
+                max_name = name
+                max_cv_df = cv_df
+                max_train_eval_df = train_eval_df
+                max_test_eval_df = test_eval_df
+                max_value = cur_value
+
+        assert max_name in est_dict
+        self.best_est = est_dict[max_name]
+        self.info["name"] = max_name
+        self.info["clf"] = self.best_est
+        self.info["eval_df"] = max_cv_df
+        self.info["train_eval_df"] = max_train_eval_df
+        self.info["test_eval_df"] = max_test_eval_df
 
         self.trained = True
         t2 = time()
@@ -534,8 +592,8 @@ class AutoRegressor(AutoLearnBase):
         """
         if not self.trained:
             raise NotFittedError('Regressor not fitted')
-        assert hasattr(self.clf, 'predict')
-        return self.clf.predict(X)
+        assert hasattr(self.best_est, 'predict')
+        return self.best_est.predict(X)
 
     def display(self, tab=True):
         """Fancy display function for al.info
@@ -549,27 +607,60 @@ class AutoRegressor(AutoLearnBase):
 
         """
 
+        # TODO(Yoshi): If print this message for self.trained == False,
+        # "Model is trained" info below is redundant (as it is always True)
         if not self.trained:
             print('Model is not trained')
             return
 
+        eval_metric = self.info['clf'].scoring
+        est_name = self.info['clf'].estimator.__class__.__name__
         metric_names = {'Model is trained': self.trained,
-                        'Best classifier': self.clf.show_models(),
-                        'Evaluation metric': self.metric,
+                        'Best estimator': est_name,
+                        'Evaluation metric': eval_metric,
                         'Dataset size': self.info["dataset_size"],
                         '# of features': self.info["feature_size"],
-                        'Classifier set level': self.level,
-                        'Including classifiers': list(map(lambda x: x[1],
-                                                          self.clf.get_models_with_weights())),
+                        'Estimator set level': self.level,
+                        'Including estimators': list(map(lambda x: x[0],
+                                                     self.est_list)),
                         'Training time': "{:.2f} sec.".format(
                             self.info["training_time"])}
 
         features_df = pd.DataFrame(list(metric_names.items()),
                                    columns=['metric',
                                             'value']).set_index('metric')
+
+        clf_metrics = ["Mean abs error",
+                       "Mean sq error",
+                       "r2",
+                       eval_metric]
+
+        metrics_df = pd.DataFrame({'metric': clf_metrics}).set_index('metric')
+        train_eval_df = self.info["train_eval_df"]
+        test_eval_df = self.info["test_eval_df"]
+
+        eval_test = self.info['eval_df']['metric_test'].mean()
+        eval_train = self.info['eval_df']['metric_train'].mean()
+        abs_test = test_eval_df['neg_mean_absolute_error'].mean()
+        abs_train = train_eval_df["neg_mean_absolute_error"].mean()
+        sq_test = test_eval_df["neg_mean_squared_error"].mean()
+        sq_train = train_eval_df["neg_mean_squared_error"].mean()
+        r2_test = test_eval_df["r2"].mean()
+        r2_train = train_eval_df["r2"].mean()
+
+        metrics_df['training set'] = [abs_train,
+                                      sq_train,
+                                      r2_train,
+                                      eval_train]
+        metrics_df['test set'] = [abs_test,
+                                  sq_test,
+                                  r2_test,
+                                  eval_test]
         if tab:
             print(tabulate(features_df, headers='keys', tablefmt='psql'))
+            print(tabulate(metrics_df, headers='keys', tablefmt='psql'))
         else:
             features_df.head()
+            metrics_df.head()
 
-        return features_df
+        return features_df, metrics_df

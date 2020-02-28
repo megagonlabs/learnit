@@ -182,7 +182,7 @@ class Evaluate():
 
         if ac is None:
             if feature_names is None:
-                raise ValueError("Either AutoConverter or feature_names must"
+                raise ValueError("Either AutoConverter or feature_names must",
                                  "be given.")
             self.feature_names = feature_names
             self.ac = None
@@ -574,8 +574,7 @@ class Evaluate():
 
         # TODO(Yoshi): Add some columns such as ==prediction== column,
         # ==confidence==. To be disccused and will be another ticket.
-        flg = y != pred_y
-        return df.loc[flg, :]
+        return df.ix[y != pred_y]
 
     def stratify_errors(self,
                         df,
@@ -717,7 +716,7 @@ class Evaluate():
             for table_colname in top_colnames:
                 # split colanme in to tablename and colname
                 tablename, colname = table_colname.split("..")
-                val = test_df.loc[index, colname]
+                val = test_df.ix[index][colname]
                 cur_explanation_list.append((colname, val))
             all_explanation_list.append(cur_explanation_list)
         explain_df = pd.DataFrame({"explanations": all_explanation_list})

@@ -16,8 +16,6 @@ from learnit.autoconverter.autoconverter import LDAVectorizer
 from learnit.autoconverter.autoconverter import TextLengthVectorizer
 from learnit.autoconverter.autoconverter import TextualAggregator
 from learnit.autoconverter.autoconverter import type_column
-from learnit.autoconverter.image import ImageVectorizer
-from learnit.autoconverter.image import PreTrainedModel
 # unittest.TestCase.setUp()
 
 
@@ -115,28 +113,6 @@ class TextLengthVectorizerTestCase(unittest.TestCase):
                          ["text_length"])
         self.assertTrue(np.array_equal(X,
                                        [[13], [16], [14]]))
-
-
-class ImageVectorizerTestCase(unittest.TestCase):
-    def setUp(self):
-        self.vectorizer = ImageVectorizer()
-        self.assertIsNotNone(self.vectorizer)
-
-    def test_fit_transform(self):
-        urls = [
-            "test_image/2737866473_7958dc8760.jpg",
-            "test_image/2875184020_9944005d0d.jpg",
-            "test_image/4094333885_e8462a8338.jpg",
-            "test_image/2809605169_8efe2b8f27.jpg",
-            "test_image/bARADEI.jpg"
-        ]
-        base_dir = os.path.abspath(os.path.dirname(__file__))
-        urls = [base_dir + "/" + x for x in urls]
-        X = self.vectorizer.fit_transform(urls)
-        use_model = self.vectorizer.trained_model["model"]
-        output_dim = PreTrainedModel.get_output_dimension(use_model)
-        self.assertTrue(X.shape, (5, output_dim))
-        self.assertTrue(len(self.vectorizer.get_feature_names()), output_dim)
 
 
 class CategoryOneHotEncoderTestCase(unittest.TestCase):
