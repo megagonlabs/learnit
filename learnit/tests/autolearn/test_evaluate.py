@@ -9,10 +9,6 @@ from sklearn.linear_model import LogisticRegression
 from learnit.autoconverter.autoconverter import AutoConverter
 from learnit.autolearn.autolearn import AutoLearn
 from learnit.autolearn.evaluate import Evaluate, ErrorSummary
-TIME_CONFIG = {
-    "time_left_for_this_task": 60,
-    "per_run_time_limit": 10
-}
 
 
 class EvaluateTestCase(unittest.TestCase):
@@ -22,7 +18,7 @@ class EvaluateTestCase(unittest.TestCase):
         ac1 = AutoConverter(target='Survived')
         self.assertTrue(True)
         X1, y1 = ac1.fit_transform(self.df1)
-        al1 = AutoLearn(level=1, **TIME_CONFIG)
+        al1 = AutoLearn(level=1)
         al1.learn(X1, y1)
         self.e1 = Evaluate(ac=ac1, alearn=al1)
         self.assertTrue(True)
@@ -42,7 +38,7 @@ class EvaluateTestCase(unittest.TestCase):
                                       data.data],
                                 columns=["class"] + data.feature_names)
         ac2 = AutoConverter(target="class")
-        al2 = AutoLearn(level=1, **TIME_CONFIG)
+        al2 = AutoLearn(level=1)
         X2, y2 = ac2.fit_transform(self.df2)
         al2.learn(X2, y2)
         self.e2 = Evaluate(ac=ac2, alearn=al2)
@@ -68,14 +64,14 @@ class EvaluateTestCase(unittest.TestCase):
         ac3 = AutoConverter(target="is_churn")
         X3, y3 = ac3.fit_transform(df=members_df,
                                    subtables=subtables3)
-        al3 = AutoLearn(level=1, **TIME_CONFIG)
+        al3 = AutoLearn(level=1)
         al3.learn(X3, y3)
         self.e3 = Evaluate(ac=ac3, alearn=al3)
 
         self.df4 = members_df
         ac4 = AutoConverter(target="is_churn", task_type="regression")
         X4, y4 = ac4.fit_transform(df=members_df)
-        al4 = AutoLearn(level=1, task="regression", **TIME_CONFIG)
+        al4 = AutoLearn(level=1, task="regression")
         al4.learn(X4, y4)
         e4 = Evaluate(alearn=al4, ac=ac4)
         self.e4 = e4
